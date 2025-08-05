@@ -54,6 +54,7 @@ class Dir4LaplacianBlur(nn.Module):
 
     def forward(self, x):
         # x: (B, 3, H, W)
+        x = x.to(self.lap_kernel.device)
         lap = F.conv2d(x, self.lap_kernel, padding=1, groups=3)  # Laplacian
         blur = F.conv2d(lap, self.gauss_kernel, padding=1, groups=3)  # Gaussian Blur
         hybrid = lap +  blur
@@ -85,7 +86,7 @@ class Dir8LaplacianBlur(nn.Module):
 
     def forward(self, x):
         # x: (B, 3, H, W)
-        lap = F.conv2d(x, self.lap_kernel, padding=1, groups=3)  # Laplacian
+        lap = F.conv2d(x.to(self.lap_kernel.device), self.lap_kernel, padding=1, groups=3)  # Laplacian
         blur = F.conv2d(lap, self.gauss_kernel, padding=1, groups=3)  # Gaussian Blur
         hybrid = lap +  blur
         return hybrid
@@ -234,6 +235,7 @@ def evaluate_model(model, dataloader, criterion, device, dataset):
                         dest_path = os.path.join("C:/Users/Admin/Desktop/Image_data/Confusion", os.path.basename(path))
                         copyfile(path, dest_path)
 
+
     avg_loss = total_loss / total
     accuracy = correct / total * 100
 
@@ -248,24 +250,24 @@ resmodel_path = "C:/Users/Admin/Desktop/기계학습 프로젝트 (201813784 손
 # === 모델 불러오기 ===
 resmodel = ResNet().to(device)
 resmodel.load_state_dict(torch.load(resmodel_path, map_location=device))
-resmodel.eval()
+# resmodel.eval()
 
 # === 테스트 수행 ===
-avg_loss, accuracy, precision, recall, f1, misclassified_files = evaluate_model(
-    resmodel, test_loader, criterion, device, test_data1
-)
+# avg_loss, accuracy, precision, recall, f1, misclassified_files = evaluate_model(
+#     resmodel, test_loader, criterion, device, test_data1
+# )
 
-print(f"""
-=== 테스트 결과 ===
-- 평균 Loss : {avg_loss:.4f}
-- 정확도    : {accuracy:.2f}%
-- 정밀도    : {precision:.2f}
-- 민감도    : {recall:.2f}
-- F1 점수   : {f1:.2f}
-- 오분류 이미지 수 : {len(misclassified_files)}
-""")
+# print(f"""
+# === 테스트 결과 ===
+# - 평균 Loss : {avg_loss:.4f}
+# - 정확도    : {accuracy:.2f}%
+# - 정밀도    : {precision:.2f}
+# - 민감도    : {recall:.2f}
+# - F1 점수   : {f1:.2f}
+# - 오분류 이미지 수 : {len(misclassified_files)}
+# """)
 
-# 오분류 파일 저장
-with open("misclassified_images.txt", "w") as f:
-    for fname in misclassified_files:
-        f.write(f"{fname}\n")
+# # 오분류 파일 저장
+# with open("misclassified_images.txt", "w") as f:
+#     for fname in misclassified_files:
+#         f.write(f"{fname}\n")
