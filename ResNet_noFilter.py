@@ -19,6 +19,25 @@ import cv2
 from torchvision.models import resnet18
 import torch.nn.functional as F
 from shutil import copyfile
+from optuna.trial import TrialState
+import json
+from torch.utils.data import ConcatDataset, random_split
+import time
+
+# === 순수 ResNet18 모델 정의 ===
+class ResNet_vanilla(nn.Module):
+    def __init__(self):
+        super().__init__()
+        base = resnet18(weights=None)
+        base.fc = nn.Linear(512, 1)
+        self.base = base
+
+    def forward(self, x):
+        return self.base(x)
+
+def init_weights(m):
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
+        nn.init.kaiming_normal_(m.weight)
 
 # 3. transform 설정
 transform = transforms.Compose([
@@ -49,81 +68,34 @@ def tensor_to_numpy(tensor):
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
-# === ResNet ===
-class ResNet_noFilter(nn.Module):
-    def __init__(self, in_channels=3, feature_dim=300, mode='discriminator'):
-        super().__init__()
-        self.mode = mode
-        self.feature_dim = feature_dim
+# 모델 평가 함수 (f1, 정확도, 평균 Loss 반환)
+def evaluate_model(model, val_loader, criterion, device):
+    """모델 평가 함수"""
+    model.eval()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
 
-        base = resnet18(weights=None)
-        if in_channels != 3:
-            base.conv1 = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
+    with torch.no_grad():
+        for imgs, labels, _ in val_loader:
+            imgs, labels = imgs.to(device), labels.float().to(device)
+            outputs = model(imgs).squeeze()
+            loss = criterion(outputs, labels)
+            total_loss += loss.item()
 
-        if mode == 'discriminator':
-            base.fc = nn.Linear(512, 1)
-        else:
-            base.fc = nn.Identity()  # feature 추출용
+            # 예측값 계산 (sigmoid 적용 후 0.5 기준으로 분류)
+            preds = torch.sigmoid(outputs) > 0.5
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
 
-        self.base = base
-        if mode == 'feature':
-            self.feature_proj = nn.Linear(512, feature_dim)
+    # F1 스코어 계산
+    f1 = f1_score(all_labels, all_preds)
+    accuracy = accuracy_score(all_labels, all_preds)
+    avg_loss = total_loss / len(val_loader)
 
-    def forward(self, x, center=None):
-        features = self.base(x)
-        if self.mode == 'discriminator':
-            return features
-        else:
-            return self.feature_proj(features)  # (B, feature_dim)
+    return f1, accuracy, avg_loss
 
-class StegoDataset(Dataset):
-    def __init__(self, samples, transform=None):
-        self.samples = samples
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.samples)
-    
-    def __getitem__(self, idx):
-        path, label = self.samples[idx]
-        img = Image.open(path).convert('RGB') # 이미지를 RGB로 가지고 옴
-        if self.transform:
-            img = self.transform(img)
-        return img, label
-
-# 3. transform 설정
-transform = transforms.Compose([
-    transforms.ToTensor()
-])
-
-# 데이터셋 생성
-def make_dataset(confusion_dir, split_ratio=0.8, seed=42):
-    cover_paths = [os.path.join(confusion_dir, f) for f in os.listdir(confusion_dir) if f.endswith('.png')]
-    stego_paths = [os.path.join(confusion_dir, f) for f in os.listdir(confusion_dir) if f.endswith('_encoded.png')]
-
-    # 라벨링
-    cover_labeled = [(path, 0) for path in cover_paths]
-    stego_labeled = [(path, 1) for path in stego_paths]
-
-    # Cover + Stego 합치고 셔플
-    full_data = cover_labeled + stego_labeled
-    random.seed(seed)
-    random.shuffle(full_data)
-
-    # Split
-    split_idx = int(len(full_data) * split_ratio)
-    train_data = full_data[:split_idx]
-    val_data = full_data[split_idx:]
-
-    return full_data
-
-
-full_dir = "C:/Users/Admin/Desktop/Image_data/Adaptive"
-test_data1 = make_dataset(full_dir)
-test_data = StegoDataset(test_data1, transform)
-test_loader = DataLoader(test_data, batch_size=16, shuffle=False)
-
-def evaluate_model(model, dataloader, criterion, device, dataset):
+def evaluate_model_for_real(model, dataloader, criterion, device):
     model.eval()
     total_loss = 0.0
     correct = 0
@@ -134,23 +106,26 @@ def evaluate_model(model, dataloader, criterion, device, dataset):
     misclassified_files = []
 
     with torch.no_grad():
-        for batch_idx, (imgs, labels) in enumerate(tqdm(dataloader, desc="테스트 진행 중")):
+        for batch_idx, (imgs, labels, paths) in enumerate(tqdm(dataloader, desc="테스트 진행 중")):
             imgs = imgs.to(device)
             labels = labels.float().to(device)
-
+        
             outputs = model(imgs).squeeze()
             loss = criterion(outputs, labels)
-
+        
             total_loss += loss.item() * imgs.size(0)
             preds = (outputs > 0.5).long()
-
-            # 정답 비교
+        
             correct += (preds == labels.long()).sum().item()
             total += imgs.size(0)
-
-            # 전체 정답 및 예측 저장
+        
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
+        
+            # 오분류 이미지 경로 저장
+            for pred, label, path in zip(preds.cpu().numpy(), labels.cpu().numpy(), paths):
+                if pred != int(label):
+                    misclassified_files.append(path)
 
     avg_loss = total_loss / total
     accuracy = correct / total * 100
@@ -161,29 +136,207 @@ def evaluate_model(model, dataloader, criterion, device, dataset):
 
     return avg_loss, accuracy, precision, recall, f1, misclassified_files
 
-resmodel_path = "C:/Users/Admin/Desktop/기계학습 프로젝트 (201813784 손형오)/resnet_trained.pth"
+class PTStegoDataset(Dataset):
+    def __init__(self, pt_path, transform=None):
+        data = torch.load(pt_path, map_location='cpu')
+        self.images = data['images']
+        self.labels = data['labels']
+        self.filenames = data['filenames']
+        self.transform = transform
 
-# === 모델 불러오기 ===
-resmodel = ResNet_noFilter().to(device)
-resmodel.load_state_dict(torch.load(resmodel_path, map_location=device), strict=False)
-resmodel.eval()
+    def __len__(self):
+        return len(self.labels)
 
-# === 테스트 수행 ===
-avg_loss, accuracy, precision, recall, f1, misclassified_files = evaluate_model(
-    resmodel, test_loader, criterion, device, test_data
-)
+    def __getitem__(self, idx):
+        img = self.images[idx]
+        label = self.labels[idx]
+        filename = self.filenames[idx]
+        if self.transform:
+            img = self.transform(img)
+        return img, label, filename
 
-print(f"""
-=== 테스트 결과 ===
-- 평균 Loss : {avg_loss:.4f}
-- 정확도    : {accuracy:.2f}%
-- 정밀도    : {precision:.2f}
-- 민감도    : {recall:.2f}
-- F1 점수   : {f1:.2f}
-- 오분류 이미지 수 : {len(misclassified_files)}
-""")
+# 모델 평가 함수 (f1, 정확도, 평균 Loss 반환)
+def evaluate_model(model, val_loader, criterion, device):
+    """모델 평가 함수"""
+    model.eval()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
 
-# 오분류 파일 저장
-with open("misclassified_images.txt", "w") as f:
-    for fname in misclassified_files:
-        f.write(f"{fname}\n")
+    with torch.no_grad():
+        for imgs, labels, filenames in val_loader:
+            imgs, labels = imgs.to(device), labels.float().to(device)
+            outputs = model(imgs).squeeze()
+            loss = criterion(outputs, labels)
+            total_loss += loss.item()
+
+            # 예측값 계산 (sigmoid 적용 후 0.5 기준으로 분류)
+            preds = torch.sigmoid(outputs) > 0.5
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    # F1 스코어 계산
+    f1 = f1_score(all_labels, all_preds)
+    accuracy = accuracy_score(all_labels, all_preds)
+    avg_loss = total_loss / len(val_loader)
+
+    return f1, accuracy, avg_loss
+
+
+# 병합
+cover_dataset = PTStegoDataset("C:/Users/Admin/Desktop/Python/Attention_Disc/adaptive_train_cover.pt")
+stego_dataset = PTStegoDataset("C:/Users/Admin/Desktop/Python/Attention_Disc/adaptive_train_stego.pt")
+full_dataset = ConcatDataset([cover_dataset, stego_dataset])
+
+# train/val 분할 (예: 80/20)
+train_size = int(0.8 * len(full_dataset))
+val_size = len(full_dataset) - train_size
+train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+
+# Early Stopping 클래스 (재사용)
+class EarlyStopping:
+    """Early Stopping 구현"""
+    def __init__(self, patience=5, min_delta=0.001, restore_best_weights=True, verbose=True):
+        """
+        Parameters:
+        - patience: 개선되지 않아도 기다릴 에포크 수
+        - min_delta: 개선으로 간주할 최소 변화량
+        - restore_best_weights: 최고 성능 모델로 복원할지 여부
+        - verbose: 출력 여부
+        """
+        self.patience = patience
+        self.min_delta = min_delta
+        self.restore_best_weights = restore_best_weights
+        self.verbose = verbose
+
+        self.best_score = None
+        self.counter = 0
+        self.best_weights = None
+        self.early_stop = False
+
+    def __call__(self, val_score, model=None):
+        score = val_score
+
+        if self.best_score is None:
+            self.best_score = score
+            self.save_checkpoint(model)
+        elif score < self.best_score + self.min_delta:
+            self.counter += 1
+            if self.verbose:
+                print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.save_checkpoint(model)
+            self.counter = 0
+
+    def save_checkpoint(self, model):
+        """최고 성능 모델 저장"""
+        if model and self.restore_best_weights:
+            self.best_weights = model.state_dict().copy()
+
+def objective(trial):
+    lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
+    wd = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)
+    batch_size = trial.suggest_categorical("batch_size", [16, 32, 64])
+
+    model = ResNet_vanilla().to(device)
+    model.apply(init_weights)
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_memory=True)
+
+    best_f1 = 0
+    early_stopping = EarlyStopping(patience=5, min_delta=0.005, restore_best_weights=True, verbose=False)
+
+    for epoch in range(15):
+        model.train()
+        for imgs, labels, _ in train_loader:
+            imgs, labels = imgs.to(device), labels.float().to(device)
+            outputs = model(imgs).squeeze()
+            loss = criterion(outputs, labels)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        f1, acc, val_loss = evaluate_model(model, val_loader, criterion, device)
+        early_stopping(-val_loss, model)
+        if f1 > best_f1:
+            best_f1 = f1
+        if early_stopping.early_stop:
+            break
+
+    if early_stopping.best_weights:
+        model.load_state_dict(early_stopping.best_weights)
+
+    final_f1, final_acc, _ = evaluate_model(model, val_loader, criterion, device)
+    return final_f1, final_acc
+
+total_start = time.time()
+study = optuna.create_study(directions=["maximize", "maximize"])
+study.optimize(objective, n_trials=10)
+
+# 최적 하이퍼파라미터 저장
+best_trial = study.best_trials[0]
+with open("best_hyperparams.json", "w") as f:
+    json.dump(best_trial.params, f)
+
+with open("best_hyperparams.json") as f:
+    best_params = json.load(f)
+
+model = ResNet_vanilla().to(device)
+model.apply(init_weights)
+optimizer = torch.optim.Adam(model.parameters(), lr=best_params["lr"], weight_decay=best_params["weight_decay"])
+batch_size = best_params["batch_size"]
+
+# === 최종 모델 학습 ===
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_memory=True)
+
+early_stopping = EarlyStopping(patience=5, min_delta=0.005, restore_best_weights=True, verbose=True)
+
+for epoch in range(20):  # 최대 20 에포크
+    model.train()
+    total_loss = 0
+    all_preds, all_labels = [], []
+
+    for imgs, labels, _ in tqdm(train_loader, desc=f"[Final Train] Epoch {epoch+1}"):
+        imgs, labels = imgs.to(device), labels.float().to(device)
+        outputs = model(imgs).squeeze()
+        loss = criterion(outputs, labels)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        preds = (outputs > 0.5).float()
+        all_preds.extend(preds.detach().cpu().numpy())
+        all_labels.extend(labels.detach().cpu().numpy())
+
+    train_f1 = f1_score(all_labels, all_preds)
+    val_f1, val_acc, val_loss = evaluate_model(model, val_loader, criterion, device)
+
+    print(f"Epoch {epoch+1} - Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}, Val Acc: {val_acc:.2f}")
+
+    early_stopping(-val_loss, model)
+    if early_stopping.early_stop:
+        print("🛑 Early stopping triggered")
+        break
+
+# 최고 성능 모델 복원
+if early_stopping.best_weights:
+    model.load_state_dict(early_stopping.best_weights)
+    print("✅ Best model weights restored")
+
+# Epoch loop (same as above)
+test_cover = PTStegoDataset("C:/Users/Admin/Desktop/Python/Attention_Disc/adaptive_test_cover.pt")
+test_stego = PTStegoDataset("C:/Users/Admin/Desktop/Python/Attention_Disc/adaptive_test_stego.pt")
+test_dataset = ConcatDataset([test_cover, test_stego])
+test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
+
+# 평가 함수
+avg_loss, acc, prec, recall, f1, misclassified = evaluate_model_for_real(model, test_loader, criterion, device)
+print(f"Test F1: {f1:.4f}, Accuracy: {acc:.2f}%, Precision: {prec:.2f}, Recall: {recall:.2f}")
