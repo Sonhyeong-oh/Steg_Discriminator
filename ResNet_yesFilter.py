@@ -19,6 +19,7 @@ import cv2
 from torchvision.models import resnet18
 import torch.nn.functional as F
 from shutil import copyfile
+import json
 
 # 3. transform 설정
 transform = transforms.Compose([
@@ -64,6 +65,37 @@ class Dir4LaplacianBlur(nn.Module):
         kernel = kernel / torch.sum(kernel)
         return kernel
 
+class Dir8LaplacianBlur(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        # Laplacian kernel
+        lap_kernel = torch.tensor([[-1,  -1, -1],
+                                   [-1,   8, -1],
+                                   [-1,  -1, -1]], dtype=torch.float32)
+        lap_kernel = lap_kernel.view(1, 1, 3, 3).repeat(3, 1, 1, 1)  # (3,1,3,3)
+        self.register_buffer('lap_kernel', lap_kernel)
+
+        # Gaussian kernel (fixed 3x3, sigma=1)
+        gauss_kernel = self._create_gaussian_kernel(3, sigma=1.0)
+        gauss_kernel = gauss_kernel.view(1, 1, 3, 3).repeat(3, 1, 1, 1)  # (3,1,3,3)
+        self.register_buffer('gauss_kernel', gauss_kernel)
+
+    def forward(self, x):
+        # x: (B, 3, H, W)
+        lap = F.conv2d(x, self.lap_kernel, padding=1, groups=3)  # Laplacian
+        blur = F.conv2d(lap, self.gauss_kernel, padding=1, groups=3)  # Gaussian Blur
+        hybrid = lap +  blur
+        return hybrid
+
+    def _create_gaussian_kernel(self, kernel_size=3, sigma=1.0):
+        """Generates a 2D Gaussian kernel."""
+        ax = torch.arange(kernel_size, dtype=torch.float32) - kernel_size // 2
+        xx, yy = torch.meshgrid(ax, ax, indexing="ij")
+        kernel = torch.exp(-(xx**2 + yy**2) / (2. * sigma**2))
+        kernel = kernel / torch.sum(kernel)
+        return kernel
+
 def to_tensor_from_bgr(np_img, device):
     # np_img: (H, W, 3), BGR, uint8
     rgb_img = np_img[..., ::-1].copy()  # BGR → RGB
@@ -85,6 +117,7 @@ class ResNet(nn.Module):
     def __init__(self, in_channels=3, feature_dim=300, mode='discriminator'):
         super().__init__()
         self.lb4 = Dir4LaplacianBlur()
+        self.lb8 = Dir8LaplacianBlur()
         self.mode = mode
         self.feature_dim = feature_dim
 
@@ -101,13 +134,37 @@ class ResNet(nn.Module):
         if mode == 'feature':
             self.feature_proj = nn.Linear(512, feature_dim)
 
-    def forward(self, x, center=None):
-        x = self.lb4.forward(x)
-        features = self.base(x)
-        if self.mode == 'discriminator':
-            return features
-        else:
-            return self.feature_proj(features)  # (B, feature_dim)
+    def forward(self, x, center=None, radius=100):
+        B, C, H, W = x.shape
+        device = x.device
+
+        # 두 필터 적용
+        x_lb4 = self.lb4(x)
+        x_lb8 = self.lb8(x)
+
+        if center is None:
+            return self.base(x_lb4)  # 전부 lb4
+
+        # 원형 마스크 생성
+        yy, xx = torch.meshgrid(
+            torch.arange(H, device=device), torch.arange(W, device=device), indexing='ij'
+        )
+        mask = torch.zeros((B, 1, H, W), device=device)
+
+        for i in range(B):
+            cx, cy = center[i]
+
+            # ⚠️ attention 미정의 → lb4만 사용
+            if cx < 0 or cy < 0:
+                mask[i, 0] = 0.0
+            else:
+                dist_sq = (xx - cx) ** 2 + (yy - cy) ** 2
+                mask[i, 0] = (dist_sq <= radius ** 2).float()
+
+        # 마스크 기반 조합
+        filtered = mask * x_lb8 + (1 - mask) * x_lb4
+
+        return self.base(filtered)
 
 class StegoDataset(Dataset):
     def __init__(self, samples, transform=None):
@@ -151,12 +208,32 @@ def make_dataset(confusion_dir, split_ratio=0.8, seed=42):
     return full_data
 
 
-full_dir = "C:/Users/Admin/Desktop/Image_data/Confusion"
-test_data1 = make_dataset(full_dir)
-test_data = StegoDataset(test_data1, transform)
+# full_dir = "C:/Users/Admin/Desktop/Image_data/Confusion"
+# test_data1 = make_dataset(full_dir)
+# test_data = StegoDataset(test_data1, transform)
+# test_loader = DataLoader(test_data, batch_size=16, shuffle=False)
+
+def make_dataset_test(cover_dir, stego_dir):
+    cover_paths = [os.path.join(cover_dir, f) for f in os.listdir(cover_dir) if f.endswith('.png')]
+    stego_paths = [os.path.join(stego_dir, f) for f in os.listdir(stego_dir) if f.endswith('.png')]
+
+    # 라벨링
+    cover_labeled = [(path, 0) for path in cover_paths]
+    stego_labeled = [(path, 1) for path in stego_paths]
+
+    # Cover + Stego 합치고 셔플
+    full_data = cover_labeled + stego_labeled
+
+    return full_data
+
+
+cover_dir = "C:/Users/Admin/Desktop/Image_data/Test/cover"
+stego_dir = "C:/Users/Admin/Desktop/Image_data/Test/stego"
+test_data = make_dataset_test(cover_dir, stego_dir)
+test_data = StegoDataset(test_data, transform)
 test_loader = DataLoader(test_data, batch_size=16, shuffle=False)
 
-def evaluate_model(model, dataloader, criterion, device, dataset):
+def evaluate_model(model, dataloader, criterion, device, dataset, attention_results=None):
     model.eval()
     total_loss = 0.0
     correct = 0
@@ -171,28 +248,53 @@ def evaluate_model(model, dataloader, criterion, device, dataset):
             imgs = imgs.to(device)
             labels = labels.float().to(device)
 
-            outputs = model(imgs).squeeze()
-            loss = criterion(outputs, labels)
+            # ✅ Attention 적용 여부 판단
+            if attention_results is not None:
+                centers = []
+                for i in range(batch_idx * dataloader.batch_size, batch_idx * dataloader.batch_size + imgs.size(0)):
+                    if i in attention_results:
+                        centers.append(attention_results[i]["center"])
+                    else:
+                        centers.append([-1, -1])  # lb4만 적용
 
+                centers = torch.tensor(centers, dtype=torch.float32, device=device)
+                outputs = model(imgs, center=centers, radius=100).squeeze()
+            else:
+                outputs = model(imgs).squeeze()  # fallback
+
+            loss = criterion(outputs, labels)
             total_loss += loss.item() * imgs.size(0)
             preds = (outputs > 0.5).long()
 
-            # 정답 비교
             correct += (preds == labels.long()).sum().item()
             total += imgs.size(0)
 
-            # 전체 정답 및 예측 저장
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
+
+            # 오분류 파일 추적 (선택사항)
+            start_idx = batch_idx * dataloader.batch_size
+            for j in range(len(labels)):
+                if preds[j] != labels[j]:
+                    misclassified_files.append(dataset.samples[start_idx + j][0])
 
     avg_loss = total_loss / total
     accuracy = correct / total * 100
 
-    precision = precision_score(all_labels, all_preds)
-    recall = recall_score(all_labels, all_preds)
-    f1 = f1_score(all_labels, all_preds)
+    precision = precision_score(all_labels, all_preds, zero_division=0)
+    recall = recall_score(all_labels, all_preds, zero_division=0)
+    f1 = f1_score(all_labels, all_preds, zero_division=0)
 
     return avg_loss, accuracy, precision, recall, f1, misclassified_files
+
+# attention 정보 로딩
+with open("C:/Users/Admin/Desktop/Python/attention_results.json", "r") as f:
+    attention_results = json.load(f)
+
+# 문자열 키를 정수 키로 변환
+attention_results = {
+    int(k): v for k, v in attention_results.items()
+}
 
 resmodel_path = "C:/Users/Admin/Desktop/기계학습 프로젝트 (201813784 손형오)/resnet_trained.pth"
 
@@ -203,7 +305,8 @@ resmodel.eval()
 
 # === 테스트 수행 ===
 avg_loss, accuracy, precision, recall, f1, misclassified_files = evaluate_model(
-    resmodel, test_loader, criterion, device, test_data
+    resmodel, test_loader, criterion, device, test_data,
+    attention_results=attention_results
 )
 
 print(f"""
