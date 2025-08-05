@@ -8,28 +8,6 @@ from tqdm import tqdm
 import gc
 from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
 
-# def evaluate_model_on_all_data(model, images, labels, device):
-#     """
-#     한 에포크가 끝난 후 전체 데이터를 기반으로 정확도와 F1 score를 평가
-#     """
-#     model.eval()
-#     val_preds = []
-#     val_targets = []
-#     center = torch.tensor([[150, 150]], dtype=torch.long).to(device)  # 중앙 고정
-
-#     with torch.no_grad():
-#         for img, label in zip(images, labels):
-#             if img.ndim == 3:
-#                 img = img.unsqueeze(0)  # (C, H, W) -> (1, C, H, W)
-#             img = img.to(device)
-#             logits, _ = model(img, center)
-#             pred = torch.argmax(logits, dim=1).item()
-#             val_preds.append(pred)
-#             val_targets.append(label.item())
-
-#     val_acc = accuracy_score(val_targets, val_preds)
-#     val_f1 = f1_score(val_targets, val_preds, average='macro')
-#     return val_acc, val_f1
 
 class PPOTrainer:
     def __init__(self, model, env, lr=1e-4, gamma=0.99, eps_clip=0.2, epochs=4, batch_size=8, device='cuda'):
@@ -60,8 +38,8 @@ class PPOTrainer:
             returns.insert(0, R)
         return torch.tensor(returns, dtype=torch.float32).to(self.device)
 
-    torch.autograd.set_detect_anomaly(True)
-    def train(self, epochs=5, episodes_per_epoch=5):
+    torch.autograd.set_detect_anomaly(False)
+    def train(self, epochs=5, num_rollout_episodes=5):
         for epoch in range(epochs):
             print(f"\n=== Epoch {epoch + 1} ===")
             memory = {
@@ -73,7 +51,7 @@ class PPOTrainer:
             all_targets = []
 
             # 🔄 tqdm 에피소드 진행률 바 적용
-            episode_bar = tqdm(range(episodes_per_epoch), desc=f"[Epoch {epoch+1}] Episodes")
+            episode_bar = tqdm(range(num_rollout_episodes), desc=f"[Epoch {epoch+1}] Episodes")
             for ep in episode_bar:
                 state = self.env.reset()
                 done = False
@@ -92,8 +70,11 @@ class PPOTrainer:
 
                     # ✅ 예측값 계산
                     with torch.no_grad():
-                        logits, _ = self.model(state['image'].to(self.device), state['center'].to(self.device))
-                        pred = torch.argmax(logits, dim=1).item()
+                        logits, _ = self.model.get_stego_prediction(
+                            state['image'].to(self.device), state['center'].to(self.device)
+                        )
+                        prob = torch.sigmoid(logits).squeeze().item()  # (B=1,)일 때 가능
+                        pred = int(prob > 0.5)
                         target = int(self.env.current_label.item())
 
                     all_preds.append(pred)
@@ -134,7 +115,8 @@ class PPOTrainer:
                     surr1 = ratio * adv
                     surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * adv
                     policy_loss = -torch.min(surr1, surr2).mean()
-                    value_loss = F.mse_loss(value.squeeze(), returns[batch_slice])
+                    value = value.view_as(returns[batch_slice])
+                    value_loss = F.mse_loss(value, returns[batch_slice])
                     loss = policy_loss + 0.5 * value_loss
 
                     self.optimizer.zero_grad()
