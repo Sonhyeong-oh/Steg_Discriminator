@@ -7,6 +7,9 @@
 5. ResNet_yesfilter : Model for measuring the misclassification rate.
 6. RL_proto : (AC + PPO) + CNN Model, where AC (Actor-Critic) selects the attention mask position, PPO (Proximal Policy Optimization) handles cumulative training, and CNN (Convolutional Neural Network) performs steganography detection.
 
+# Data
+https://www.kaggle.com/datasets/muhammadbasitali/steganography-images-all-features-datasets
+
 # Model Architecture
 <img width="1814" height="825" alt="image" src="https://github.com/user-attachments/assets/1ddcad00-0b8f-479c-b9d1-3baf0b5bdfb0" />
 
@@ -20,3 +23,6 @@
 | **Precision** | 0.83 | 0.84 |
 | **Recall** | 0.94 | 0.88 |
 | **F1 Score** | 0.88 | 0.86 |
+
+# Reference
+Boroumand, M., Chen, M. and Fridrich, J. “Deep Residual Network for Steganalysis of Digital Images”, IEEE Transactions on Inf. Forensics Security
