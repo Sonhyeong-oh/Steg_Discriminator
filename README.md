@@ -26,3 +26,4 @@ https://www.kaggle.com/datasets/muhammadbasitali/steganography-images-all-featur
 
 # Reference
 Boroumand, M., Chen, M. and Fridrich, J. “Deep Residual Network for Steganalysis of Digital Images”, IEEE Transactions on Inf. Forensics Security
+https://ieeexplore.ieee.org/document/8470101
