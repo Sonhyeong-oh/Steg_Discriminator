@@ -10,6 +10,10 @@
 # Data
 https://www.kaggle.com/datasets/muhammadbasitali/steganography-images-all-features-datasets
 
+# Filtering Test
+- Colab Link
+https://colab.research.google.com/drive/1O3fgns8Ka32zyGGLqzCKrct-FYLhDqDU
+
 # Model Architecture
 <img width="1814" height="825" alt="image" src="https://github.com/user-attachments/assets/1ddcad00-0b8f-479c-b9d1-3baf0b5bdfb0" />
 
