@@ -1,9 +1,8 @@
-# NIS
-NIS thesis contest
+# Steganography Discriminator using CNN & RL
 
-1. CNN_Disc : 강화학습 학습 시 reward 반환용 resnet 탐지기
-2. filter_ex : 라플라시안 필터 시험 적용용 코드
-3. PPOTrainer : 강화학습 모델 누적 학습을 위한 PPO 학습기
-4. ResNet_nofilter : 적응형 필터 적용 이미지 분류 테스트를 위한 모델
-5. ResNet_yesfilter : 오분류율 측정을 위한 모델
-6. RL_proto : (AC + PPO) + CNN 모델, AC로 어텐션 마스크 위치 선정, PPO가 누적 학습, CNN이 스테가노그래피 탐지
+1. CNN_Disc : ResNet detector for reward return during Reinforcement Learning training.
+2. filter_ex : Code for experimental application of the Laplacian filter.
+3. PPOTrainer : PPO trainer for cumulative training of the Reinforcement Learning model.
+4. ResNet_nofilter : Model for image classification testing without an adaptive filter applied.
+5. ResNet_yesfilter : Model for measuring the misclassification rate.
+6. RL_proto : (AC + PPO) + CNN Model, where AC (Actor-Critic) selects the attention mask position, PPO (Proximal Policy Optimization) handles cumulative training, and CNN (Convolutional Neural Network) performs steganography detection.
