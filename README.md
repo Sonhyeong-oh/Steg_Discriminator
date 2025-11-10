@@ -1,3 +1,5 @@
+<img src="https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=Python&logoColor=white"/> <img src="https://img.shields.io/badge/Gymnasium-7F00FF?style=flat-square&logoColor=white"/>
+
 # Steganography Discriminator using CNN & RL
 
 1. CNN_Disc : ResNet detector for reward return during Reinforcement Learning training.
