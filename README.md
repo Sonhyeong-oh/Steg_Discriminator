@@ -30,9 +30,6 @@ https://colab.research.google.com/drive/1O3fgns8Ka32zyGGLqzCKrct-FYLhDqDU
 | **Recall** | 0.94 | 0.88 |
 | **F1 Score** | 0.88 | 0.86 |
 
-# Paper (Unpublished)
-https://drive.google.com/file/d/1smXe3KtspSlClE2SBaJ1sulrFRm7zmGZ/view?usp=drive_link
-
 # Reference
 Boroumand, M., Chen, M. and Fridrich, J. “Deep Residual Network for Steganalysis of Digital Images”, IEEE Transactions on Inf. Forensics Security
 https://ieeexplore.ieee.org/document/8470101
